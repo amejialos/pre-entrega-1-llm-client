@@ -200,6 +200,15 @@ Durante la iteración del stream se atrapa cualquier excepción (los SDKs no env
 errores de transporte en esa fase) y se traduce con la misma tabla; no se reintenta,
 porque ya se entregó texto al consumidor.
 
+Lo mismo vale para la llamada que abre el stream y para la de `generate`: se atrapa
+`Exception`, no solo `APIError`, porque un cambio de firma del SDK (un `TypeError`) o un
+argumento inválido también deben salir como `LLMError`. El contrato es que al llamador le
+alcanza con `except LLMError`; la causa original queda encadenada para depurar.
+
+Si el consumidor abandona el stream con `break`, el cierre del stream del SDK ocurre
+recién cuando el generador se finaliza. Para cerrar de inmediato, el llamador envuelve el
+generador en `contextlib.aclosing()`; el README y el docstring de `stream` lo indican.
+
 ### 3.6 `anthropic_client.py`
 
 ```python
