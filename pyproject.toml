@@ -2,6 +2,7 @@
 name = "llm-client"
 version = "0.1.0"
 description = "Unified Async LLM Client: OpenAI y Anthropic bajo una interfaz común y asíncrona"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=1.4.0",
