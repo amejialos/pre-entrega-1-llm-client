@@ -315,7 +315,7 @@ API de OpenAI. Con una key gratuita de Google AI Studio, el `.env` queda:
 ```
 OPENAI_API_KEY=<key de Gemini>
 OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
-OPENAI_MODEL=gemini-2.5-flash
+OPENAI_MODEL=gemini-3.6-flash
 ```
 
 `OpenAIClient` no cambia. El README documenta este uso.
@@ -325,7 +325,10 @@ OPENAI_MODEL=gemini-2.5-flash
 1. `load_dotenv()`.
 2. Argumento opcional `--provider {openai,anthropic}`; sin él, prueba ambos.
 3. Pregunta: un `ChatMessage(role="user", content="¿Qué es la entropía?")` con
-   `ModelConfig(temperature=0.7, max_tokens=200)`.
+   `ModelConfig(temperature=0.7, max_tokens=4096, system_prompt="Respondé en español y en
+   menos de 150 palabras.")`. El presupuesto es alto porque los modelos con razonamiento
+   (Gemini 3.x) gastan tokens pensando antes de responder y con 200 la respuesta llegaba
+   cortada; el `system_prompt` ejercita el camino que cada proveedor trata distinto.
 4. Bloque 1, modo normal: lanza `run_normal(provider)` para cada proveedor con
    `asyncio.gather` y muestra el tiempo total, para evidenciar la concurrencia.
 5. Bloque 2, modo streaming: `run_stream(provider)` secuencial, imprimiendo cada

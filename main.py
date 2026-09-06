@@ -20,7 +20,13 @@ QUESTION = "¿Qué es la entropía?"
 
 def build_request() -> tuple[list[ChatMessage], ModelConfig]:
     messages = [ChatMessage(role="user", content=QUESTION)]
-    config = ModelConfig(temperature=0.7, max_tokens=200)
+    config = ModelConfig(
+        temperature=0.7,
+        # Los modelos con razonamiento (Gemini 3.x) gastan tokens pensando antes de
+        # responder; con un presupuesto chico la respuesta llega cortada.
+        max_tokens=4096,
+        system_prompt="Respondé en español y en menos de 150 palabras.",
+    )
     return messages, config
 
 
@@ -32,7 +38,7 @@ async def run_normal(provider: str) -> None:
         print(f"\n[{provider} / {response.model}]\n{response.content}")
         print(
             f"[{provider}] tokens: {response.input_tokens} de entrada, "
-            f"{response.output_tokens} de salida"
+            f"{response.output_tokens} de salida, fin: {response.finish_reason}"
         )
     except LLMError as error:
         print(f"\n[{provider}] error controlado: {error}")

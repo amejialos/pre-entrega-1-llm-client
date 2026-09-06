@@ -103,7 +103,7 @@ OPENAI_MODEL=gpt-4o-mini
 # Para probar el camino de OpenAI gratis con una key de Gemini (Google AI Studio):
 #   OPENAI_API_KEY=<tu key de Gemini, empieza con AIza>
 #   OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
-#   OPENAI_MODEL=gemini-2.5-flash
+#   OPENAI_MODEL=gemini-3.6-flash
 # OPENAI_BASE_URL=
 
 # --- Anthropic ---
@@ -1706,12 +1706,12 @@ def test_el_nombre_del_proveedor_se_normaliza(monkeypatch):
 
 def test_modelo_y_base_url_desde_el_entorno(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "falsa")
-    monkeypatch.setenv("OPENAI_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("OPENAI_MODEL", "gemini-3.6-flash")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
 
     manager = AsyncLLMManager(provider="openai")
 
-    assert manager.client.model == "gemini-2.5-flash"
+    assert manager.client.model == "gemini-3.6-flash"
     assert manager.client.base_url == "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 
@@ -2012,7 +2012,7 @@ Expected (todavía no hay `.env`): dos bloques con `error controlado: [openai] F
 - [ ] **Step 3: Crear el `.env` local**
 
 Run: `cp .env.example .env`
-Después, el usuario edita `.env` en el editor y pega su key de Gemini en la sección de OpenAI (las tres líneas: `OPENAI_API_KEY`, `OPENAI_BASE_URL` descomentada, `OPENAI_MODEL=gemini-2.5-flash`). La key no se pega en el chat.
+Después, el usuario edita `.env` en el editor y pega su key de Gemini en la sección de OpenAI (las tres líneas: `OPENAI_API_KEY`, `OPENAI_BASE_URL` descomentada, `OPENAI_MODEL=gemini-3.6-flash`). La key no se pega en el chat.
 
 Run: `git status --short`
 Expected: `.env` NO aparece (está en `.gitignore`).
@@ -2119,7 +2119,7 @@ habla con Gemini sin cambiar código:
 ```
 OPENAI_API_KEY=<tu key de Gemini>
 OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
-OPENAI_MODEL=gemini-2.5-flash
+OPENAI_MODEL=gemini-3.6-flash
 ```
 
 ## Correr el script de validación
@@ -2282,3 +2282,7 @@ porqué de cada desvío respecto de los bloques de código de arriba.
   que imprime `error inesperado: ...`, porque una excepción no atrapada dentro de
   `asyncio.gather` cancela el script entero y deja al otro proveedor sin terminar.
 - **Task 9, README:** la nota sobre temperatura menciona el envío por `extra_body`.
+- **Task 8, `main.py` (tras la prueba real con Gemini):** `max_tokens` pasa de 200 a 4096 y se
+  agrega `system_prompt`, porque Gemini 3.6 Flash razona antes de responder y con 200 tokens la
+  respuesta llegaba cortada (`finish_reason="length"`); la salida muestra `finish_reason`. El
+  modelo gratuito de ejemplo pasa a `gemini-3.6-flash` (Google retiró 2.5 para cuentas nuevas).

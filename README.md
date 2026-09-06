@@ -69,7 +69,7 @@ habla con Gemini sin cambiar código:
 ```
 OPENAI_API_KEY=<tu key de Gemini>
 OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
-OPENAI_MODEL=gemini-2.5-flash
+OPENAI_MODEL=gemini-3.6-flash
 ```
 
 ## Correr el script de validación
@@ -161,3 +161,6 @@ error sin reintentar, porque repetir la llamada duplicaría texto ya mostrado.
   recolecta.
 - Los clientes no cierran explícitamente el pool de conexiones del SDK (no hay `aclose()`);
   para un script corto no importa, en un servicio de larga vida convendría agregarlo.
+- Los modelos con razonamiento (por ejemplo Gemini 3.x) gastan `max_tokens` pensando antes
+  de responder, y ese gasto no aparece en `output_tokens`. Con un presupuesto chico la
+  respuesta llega cortada (`finish_reason="length"`); por eso `main.py` usa `max_tokens=4096`.
