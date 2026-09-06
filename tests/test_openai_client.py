@@ -98,6 +98,20 @@ async def test_choices_vacio_se_traduce_a_provider_error():
         await client.generate(MESSAGES)
 
 
+async def test_respuesta_con_forma_inesperada_se_traduce_a_provider_error():
+    """Un endpoint no estándar (ej. Gemini) puede violar el schema de ModelResponse
+    (p.ej. `model` en None). No debe escapar como pydantic.ValidationError crudo."""
+    response = openai_response("x")
+    response.model = None
+    client, _ = make_client(response, attempts=1)
+
+    with pytest.raises(errors.LLMProviderError) as info:
+        await client.generate(MESSAGES)
+
+    assert "Respuesta inesperada" in str(info.value)
+    assert info.value.original is not None
+
+
 # --- Streaming ------------------------------------------------------------------
 
 

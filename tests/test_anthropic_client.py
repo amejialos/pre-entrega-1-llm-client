@@ -103,6 +103,20 @@ async def test_generate_concatena_solo_bloques_de_texto():
     assert (await client.generate(MESSAGES)).content == "Hola mundo"
 
 
+async def test_respuesta_con_forma_inesperada_se_traduce_a_provider_error():
+    """Un endpoint no estándar puede devolver una forma que rompe el parseo (ej. sin
+    `usage`). No debe escapar como AttributeError crudo."""
+    response = anthropic_response("x")
+    response.usage = None
+    client, _ = make_client(response, attempts=1)
+
+    with pytest.raises(errors.LLMProviderError) as info:
+        await client.generate(MESSAGES)
+
+    assert "Respuesta inesperada" in str(info.value)
+    assert info.value.original is not None
+
+
 # --- Streaming ------------------------------------------------------------------
 
 

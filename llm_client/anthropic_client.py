@@ -7,7 +7,7 @@ import anthropic
 from anthropic import AsyncAnthropic
 
 from .base import BaseLLMClient
-from .errors import LLMError, translate_sdk_error
+from .errors import LLMError, LLMProviderError, translate_sdk_error
 from .retry import with_retry
 from .schemas import ChatMessage, ModelConfig, ModelResponse, Provider
 
@@ -101,16 +101,21 @@ class AnthropicClient(BaseLLMClient):
         except anthropic.APIError as error:
             raise self._translate(error) from error
 
-        # response.content es una lista de bloques; solo nos interesan los de texto.
-        text = "".join(block.text for block in response.content if block.type == "text")
-        return ModelResponse(
-            content=text,
-            model=response.model,
-            provider=self.provider,
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
-            finish_reason=response.stop_reason,
-        )
+        try:
+            # response.content es una lista de bloques; solo nos interesan los de texto.
+            text = "".join(block.text for block in response.content if block.type == "text")
+            return ModelResponse(
+                content=text,
+                model=response.model,
+                provider=self.provider,
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                finish_reason=response.stop_reason,
+            )
+        except Exception as error:  # forma de respuesta inesperada (endpoint no estándar, cambio del SDK)
+            raise LLMProviderError(
+                f"Respuesta inesperada del proveedor: {error}", provider=self.provider, original=error
+            ) from error
 
     async def _open_stream(self, messages: list[ChatMessage], config: ModelConfig):
         try:

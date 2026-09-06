@@ -36,6 +36,8 @@ async def run_normal(provider: str) -> None:
         )
     except LLMError as error:
         print(f"\n[{provider}] error controlado: {error}")
+    except Exception as error:  # red de seguridad: un bug no debe tirar abajo al otro proveedor
+        print(f"\n[{provider}] error inesperado: {type(error).__name__}: {error}")
 
 
 async def run_stream(provider: str) -> None:
@@ -48,6 +50,8 @@ async def run_stream(provider: str) -> None:
         print()
     except LLMError as error:
         print(f"\n[{provider}] error controlado: {error}")
+    except Exception as error:  # red de seguridad: un bug no debe tirar abajo al otro proveedor
+        print(f"\n[{provider}] error inesperado: {type(error).__name__}: {error}")
 
 
 async def main(providers: tuple[str, ...]) -> None:

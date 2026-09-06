@@ -104,16 +104,21 @@ class OpenAIClient(BaseLLMClient):
                 "La API no devolvió ninguna respuesta (choices vacío)", provider=self.provider
             )
 
-        choice = response.choices[0]
-        usage = response.usage
-        return ModelResponse(
-            content=choice.message.content or "",
-            model=response.model,
-            provider=self.provider,
-            input_tokens=usage.prompt_tokens if usage else None,
-            output_tokens=usage.completion_tokens if usage else None,
-            finish_reason=choice.finish_reason,
-        )
+        try:
+            choice = response.choices[0]
+            usage = response.usage
+            return ModelResponse(
+                content=choice.message.content or "",
+                model=response.model,
+                provider=self.provider,
+                input_tokens=usage.prompt_tokens if usage else None,
+                output_tokens=usage.completion_tokens if usage else None,
+                finish_reason=choice.finish_reason,
+            )
+        except Exception as error:  # forma de respuesta inesperada (endpoint no estándar, cambio del SDK)
+            raise LLMProviderError(
+                f"Respuesta inesperada del proveedor: {error}", provider=self.provider, original=error
+            ) from error
 
     async def _open_stream(self, messages: list[ChatMessage], config: ModelConfig):
         try:
