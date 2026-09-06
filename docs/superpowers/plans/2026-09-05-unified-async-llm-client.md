@@ -2245,3 +2245,40 @@ Expected: `gh` crea el repo en la cuenta autenticada, configura `origin` y sube 
 
 Run: `gh repo view --web`
 Expected: se abre el repo en el navegador con el README renderizado y sin `.env`.
+
+---
+
+## Cambios decididos durante la ejecución
+
+Las revisiones por tarea encontraron defectos en el plan (no en la implementación) y se
+resolvieron con estas decisiones. El código final del repo es la referencia; acá queda el
+porqué de cada desvío respecto de los bloques de código de arriba.
+
+- **Task 5, `errors.py`:** `translate_sdk_error` también importa `httpx2` (con fallback a
+  `httpx`) y mapea `httpx.HTTPError` / `httpx.StreamError` a `LLMNetworkError` antes del
+  fallback final. Motivo: durante la iteración de un stream los SDKs no envuelven los
+  errores de transporte. `httpx2` pasa a ser dependencia directa (`uv add httpx2`).
+- **Task 5 y 6, `stream()`:** el `except` que envuelve el `async for` atrapa `Exception`
+  (no solo `APIError`) y traduce. Los `except` de `_generate_once` y `_open_stream`
+  siguen atrapando solo `APIError`.
+- **Task 5, `_generate_once`:** guarda `if not response.choices: raise LLMProviderError(...)`
+  antes de leer `choices[0]`; y el parseo completo (hasta el `return ModelResponse`) va en
+  un `try/except Exception` que lanza `LLMProviderError("Respuesta inesperada del
+  proveedor: ...")` con la excepción original encadenada. Lo mismo en Task 6.
+- **Task 6, temperatura:** anthropic 1.4.0 no acepta `temperature` en `messages.create()`
+  (es un `TypeError`). Se envía `extra_body={"temperature": min(valor, 1.0)}`, que es lo
+  que documenta la guía de migración del SDK para modelos que aún lo aceptan (Haiku 4.5).
+  Los tests de temperatura verifican `request["extra_body"]` y que no haya `temperature`
+  a nivel superior.
+- **Task 5 y 6, tests:** `tests/fakes.py` usa el fallback `httpx2`/`httpx` también para
+  OpenAI (openai 3.8.0 usa `httpx2`; `httpx` no está instalado) y agrega
+  `transport_error()`. Cada cliente suma: un test de error de transporte a mitad de stream
+  (`LLMNetworkError`), uno de `RuntimeError` a mitad de stream (`LLMProviderError`), uno de
+  respuesta con forma inesperada (`LLMProviderError`), y
+  `test_los_parametros_enviados_existen_en_el_sdk_real`, que valida los kwargs capturados
+  por el fake contra la firma real del SDK con `inspect.signature(...).bind(...)`. OpenAI
+  suma además el test de `choices` vacío.
+- **Task 8, `main.py`:** `run_normal` y `run_stream` agregan un `except Exception` final
+  que imprime `error inesperado: ...`, porque una excepción no atrapada dentro de
+  `asyncio.gather` cancela el script entero y deja al otro proveedor sin terminar.
+- **Task 9, README:** la nota sobre temperatura menciona el envío por `extra_body`.

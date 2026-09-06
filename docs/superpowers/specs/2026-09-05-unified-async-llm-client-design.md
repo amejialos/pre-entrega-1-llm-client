@@ -111,6 +111,13 @@ class LLMProviderError(LLMError): ...    # cualquier otro error HTTP (400, 404, 
 `str(error)` devuelve `"[provider] mensaje"`. `original` conserva la excepción del SDK
 para depuración; se encadena con `raise ... from original`.
 
+La traducción desde los SDKs vive en una sola función, `translate_sdk_error(error, *,
+provider, sdk)`, porque ambos SDKs exponen la misma jerarquía de excepciones con los
+mismos nombres: se le pasa el módulo (`openai` o `anthropic`). Además de las excepciones
+del SDK, mapea los errores de transporte de `httpx2`/`httpx` (`HTTPError`, `StreamError`)
+a `LLMNetworkError`, porque durante la iteración de un stream los SDKs no los envuelven.
+Por eso `httpx2` figura como dependencia directa.
+
 ### 3.3 `retry.py`
 
 ```python
@@ -168,7 +175,11 @@ class OpenAIClient(BaseLLMClient):
 - `generate`: `await with_retry(lambda: self._generate_once(messages, config))`.
   `_generate_once` llama a `chat.completions.create(...)` y construye `ModelResponse`
   desde `choices[0].message.content`, `usage.prompt_tokens`, `usage.completion_tokens`,
-  `choices[0].finish_reason`, `response.model`.
+  `choices[0].finish_reason`, `response.model`. Si `choices` viene vacío (pasa con
+  endpoints compatibles y filtros de contenido) lanza `LLMProviderError`. Si el parseo de
+  la respuesta falla por cualquier motivo (forma inesperada, cambio del SDK), lanza
+  `LLMProviderError("Respuesta inesperada del proveedor: ...")` con la excepción original
+  encadenada: al llamador siempre le alcanza con `except LLMError`.
 - `stream`: abre el stream con `with_retry(lambda: self._open_stream(...))`, donde
   `_open_stream` hace `await chat.completions.create(..., stream=True)`. Luego itera
   `async for chunk in stream`, y hace `yield chunk.choices[0].delta.content` cuando
@@ -185,8 +196,9 @@ class OpenAIClient(BaseLLMClient):
 | `APIStatusError` (resto: 400, 404, ...) | `LLMProviderError` |
 | `APIConnectionError` (incluye `APITimeoutError`) | `LLMNetworkError` |
 
-Los errores que ocurren durante la iteración del stream se traducen igual pero no se
-reintentan, porque ya se entregó texto al consumidor.
+Durante la iteración del stream se atrapa cualquier excepción (los SDKs no envuelven los
+errores de transporte en esa fase) y se traduce con la misma tabla; no se reintenta,
+porque ya se entregó texto al consumidor.
 
 ### 3.6 `anthropic_client.py`
 
@@ -202,7 +214,12 @@ class AnthropicClient(BaseLLMClient):
 - Conversión de mensajes: Anthropic no acepta rol `system` en la lista. Los mensajes con
   rol `system` se extraen y se concatenan (separados por línea en blanco) junto con
   `config.system_prompt` en el parámetro `system`. Si no hay nada, no se envía `system`.
-- `temperature`: si viene, se recorta a `min(valor, 1.0)` porque Anthropic acepta 0 a 1.
+- `temperature`: si viene, se recorta a `min(valor, 1.0)` porque Anthropic acepta 0 a 1,
+  y se envía como `extra_body={"temperature": ...}`. El SDK 1.x quitó `temperature` de la
+  firma tipada de `messages.create()` (pasarlo como argumento es un `TypeError`), pero la
+  API sigue aceptándolo en Haiku 4.5 y modelos anteriores; `extra_body` es el camino que
+  documenta la guía de migración del SDK. Los modelos nuevos responden 400, que se traduce
+  a `LLMProviderError`.
 - `generate`: `messages.create(...)`. `content` se arma concatenando los bloques de tipo
   `text` de `response.content`. Tokens desde `usage.input_tokens` y
   `usage.output_tokens`; `finish_reason` desde `stop_reason`.
@@ -306,7 +323,10 @@ OPENAI_MODEL=gemini-2.5-flash
    fragmento con `end=""` y `flush=True`.
 6. Cada `run_*` envuelve todo (incluida la construcción del manager) en
    `try/except LLMError` e imprime `error controlado: ...`. Un proveedor que falla no
-   afecta al otro. El script siempre termina con código 0.
+   afecta al otro. Como red de seguridad, un `except Exception` final imprime
+   `error inesperado: ...` para que un bug tampoco tire abajo al otro proveedor
+   (dentro de `asyncio.gather`, una excepción no atrapada cancela el script entero).
+   El script siempre termina con código 0.
 
 Sin keys configuradas, la salida son cuatro mensajes de error controlado. Con keys, las
 respuestas reales.
@@ -322,6 +342,12 @@ devolver una respuesta, devolver un stream de fragmentos, o lanzar una secuencia
 excepciones reales del SDK (por ejemplo `openai.RateLimitError`) construidas con
 respuestas HTTP falsas. Los fakes registran cuántas veces se los llamó y con qué
 argumentos.
+
+Un fake que acepta cualquier argumento no detecta cuando el SDK cambia su firma (así
+pasó con `temperature` en Anthropic). Por eso cada cliente tiene un test que toma los
+argumentos capturados por el fake y los valida contra la firma real del método del SDK
+con `inspect.signature(...).bind(...)`: sin red, sin keys, y falla apenas el SDK deja de
+aceptar algo que enviamos.
 
 | Archivo | Casos |
 |---|---|
