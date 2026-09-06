@@ -1,0 +1,304 @@
+"""Tests de AnthropicClient con un SDK falso. No tocan la red ni necesitan keys."""
+
+import contextlib
+import inspect
+from types import SimpleNamespace
+
+import anthropic
+import pytest
+
+from llm_client import errors
+from llm_client.anthropic_client import AnthropicClient
+from llm_client.schemas import ChatMessage, ModelConfig
+from tests.fakes import (
+    FakeStream,
+    anthropic_connection_error,
+    anthropic_event,
+    anthropic_json_delta_event,
+    anthropic_response,
+    anthropic_status_error,
+    anthropic_text_event,
+    fake_anthropic_sdk,
+    transport_error,
+)
+
+MESSAGES = [ChatMessage(role="user", content="¿Qué es la entropía?")]
+
+
+def make_client(*results, attempts=3, base_delay=0.0):
+    sdk, endpoint = fake_anthropic_sdk(*results)
+    client = AnthropicClient(api_key="falsa", client=sdk, attempts=attempts, base_delay=base_delay)
+    return client, endpoint
+
+
+# --- Modo normal --------------------------------------------------------------
+
+
+async def test_generate_traduce_la_respuesta_del_sdk():
+    client, _ = make_client(
+        anthropic_response("La entropía mide el desorden.", input_tokens=12, output_tokens=7)
+    )
+
+    response = await client.generate(MESSAGES)
+
+    assert response.content == "La entropía mide el desorden."
+    assert response.provider == "anthropic"
+    assert response.model == "claude-haiku-4-5"
+    assert response.input_tokens == 12
+    assert response.output_tokens == 7
+    assert response.finish_reason == "end_turn"
+
+
+async def test_generate_envia_modelo_mensajes_y_max_tokens():
+    client, endpoint = make_client(anthropic_response("ok"))
+
+    await client.generate(MESSAGES, ModelConfig(max_tokens=50))
+
+    request = endpoint.calls[0]
+    assert request["model"] == "claude-haiku-4-5"
+    assert request["messages"] == [{"role": "user", "content": "¿Qué es la entropía?"}]
+    assert request["max_tokens"] == 50
+    assert "temperature" not in request
+    assert "extra_body" not in request
+    assert "system" not in request
+    assert "stream" not in request
+
+
+async def test_mensajes_system_y_system_prompt_van_en_el_parametro_system():
+    client, endpoint = make_client(anthropic_response("ok"))
+    messages = [
+        ChatMessage(role="system", content="Respondé en una línea."),
+        ChatMessage(role="user", content="hola"),
+    ]
+
+    await client.generate(messages, ModelConfig(system_prompt="Sos un físico."))
+
+    request = endpoint.calls[0]
+    assert request["system"] == "Sos un físico.\n\nRespondé en una línea."
+    assert request["messages"] == [{"role": "user", "content": "hola"}]
+
+
+async def test_temperature_se_recorta_a_uno():
+    client, endpoint = make_client(anthropic_response("ok"))
+    await client.generate(MESSAGES, ModelConfig(temperature=1.5))
+    request = endpoint.calls[0]
+    assert request["extra_body"] == {"temperature": 1.0}
+    assert "temperature" not in request
+
+
+async def test_temperature_dentro_del_rango_no_cambia():
+    client, endpoint = make_client(anthropic_response("ok"))
+    await client.generate(MESSAGES, ModelConfig(temperature=0.3))
+    assert endpoint.calls[0]["extra_body"] == {"temperature": 0.3}
+
+
+async def test_generate_concatena_solo_bloques_de_texto():
+    response = anthropic_response("Hola")
+    response.content = [
+        SimpleNamespace(type="thinking", thinking="..."),
+        SimpleNamespace(type="text", text="Hola"),
+        SimpleNamespace(type="text", text=" mundo"),
+    ]
+    client, _ = make_client(response)
+
+    assert (await client.generate(MESSAGES)).content == "Hola mundo"
+
+
+async def test_respuesta_con_forma_inesperada_se_traduce_a_provider_error():
+    """Un endpoint no estándar puede devolver una forma que rompe el parseo (ej. sin
+    `usage`). No debe escapar como AttributeError crudo."""
+    response = anthropic_response("x")
+    response.usage = None
+    client, _ = make_client(response, attempts=1)
+
+    with pytest.raises(errors.LLMProviderError) as info:
+        await client.generate(MESSAGES)
+
+    assert "Respuesta inesperada" in str(info.value)
+    assert info.value.original is not None
+
+
+async def test_excepcion_no_sdk_al_generar_se_traduce_a_provider_error():
+    """Un cambio de firma del SDK (TypeError) tampoco debe escapar cruda."""
+    error = TypeError("got an unexpected keyword argument 'x'")
+    client, _ = make_client(error, attempts=1)
+
+    with pytest.raises(errors.LLMProviderError) as info:
+        await client.generate(MESSAGES)
+
+    assert info.value.original is error
+    assert info.value.__cause__ is error
+
+
+# --- Streaming ------------------------------------------------------------------
+
+
+async def test_stream_solo_emite_text_delta():
+    stream = FakeStream(
+        [
+            anthropic_event("message_start"),
+            anthropic_text_event("La "),
+            anthropic_json_delta_event(),
+            anthropic_text_event("entropía"),
+            anthropic_event("message_stop"),
+        ]
+    )
+    client, endpoint = make_client(stream)
+
+    chunks = [chunk async for chunk in client.stream(MESSAGES)]
+
+    assert chunks == ["La ", "entropía"]
+    assert endpoint.calls[0]["stream"] is True
+    assert stream.closed
+
+
+async def test_stream_reintenta_la_apertura():
+    client, endpoint = make_client(
+        anthropic_status_error(anthropic.RateLimitError, 429),
+        FakeStream([anthropic_text_event("ok")]),
+    )
+    assert [chunk async for chunk in client.stream(MESSAGES)] == ["ok"]
+    assert len(endpoint.calls) == 2
+
+
+async def test_error_a_mitad_de_stream_se_traduce_sin_reintentar():
+    stream = FakeStream([anthropic_text_event("La ")], fail_after=anthropic_connection_error())
+    client, endpoint = make_client(stream)
+    received = []
+
+    with pytest.raises(errors.LLMNetworkError):
+        async for chunk in client.stream(MESSAGES):
+            received.append(chunk)
+
+    assert received == ["La "]
+    assert len(endpoint.calls) == 1
+    assert stream.closed
+
+
+async def test_error_de_transporte_a_mitad_de_stream_se_traduce_sin_reintentar():
+    """El SDK no envuelve los cortes de conexión durante la iteración: llegan como
+    excepción de httpx, no como anthropic.APIError. También se deben traducir."""
+    stream = FakeStream([anthropic_text_event("La ")], fail_after=transport_error())
+    client, endpoint = make_client(stream)
+    received = []
+
+    with pytest.raises(errors.LLMNetworkError):
+        async for chunk in client.stream(MESSAGES):
+            received.append(chunk)
+
+    assert received == ["La "]
+    assert len(endpoint.calls) == 1
+    assert stream.closed
+
+
+async def test_error_inesperado_a_mitad_de_stream_se_traduce_como_provider_error():
+    """Cualquier otra excepción no prevista tampoco debe escapar cruda."""
+    error = RuntimeError("inesperado")
+    stream = FakeStream([anthropic_text_event("La ")], fail_after=error)
+    client, _ = make_client(stream)
+    received = []
+
+    with pytest.raises(errors.LLMProviderError) as info:
+        async for chunk in client.stream(MESSAGES):
+            received.append(chunk)
+
+    assert received == ["La "]
+    assert info.value.original is error
+    assert stream.closed
+
+
+async def test_excepcion_no_sdk_al_abrir_stream_se_traduce_a_provider_error():
+    """Un cambio de firma del SDK (TypeError) al abrir el stream tampoco debe escapar cruda."""
+    error = TypeError("got an unexpected keyword argument 'x'")
+    client, _ = make_client(error, attempts=1)
+
+    with pytest.raises(errors.LLMProviderError) as info:
+        [chunk async for chunk in client.stream(MESSAGES)]
+
+    assert info.value.original is error
+    assert info.value.__cause__ is error
+
+
+async def test_stream_abandonado_con_aclosing_cierra_el_stream():
+    stream = FakeStream(
+        [anthropic_text_event("La "), anthropic_text_event("entro"), anthropic_text_event("pía")]
+    )
+    client, _ = make_client(stream)
+
+    async with contextlib.aclosing(client.stream(MESSAGES)) as chunks:
+        async for chunk in chunks:
+            break
+
+    assert stream.closed
+
+
+# --- Traducción de errores y reintentos ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sdk_error, expected",
+    [
+        (anthropic_status_error(anthropic.AuthenticationError, 401), errors.LLMAuthError),
+        (anthropic_status_error(anthropic.PermissionDeniedError, 403), errors.LLMAuthError),
+        (anthropic_status_error(anthropic.RateLimitError, 429), errors.LLMRateLimitError),
+        (anthropic_status_error(anthropic.InternalServerError, 500), errors.LLMServerError),
+        (anthropic_status_error(anthropic.APIStatusError, 529), errors.LLMServerError),
+        (anthropic_status_error(anthropic.BadRequestError, 400), errors.LLMProviderError),
+        (anthropic_status_error(anthropic.NotFoundError, 404), errors.LLMProviderError),
+        (anthropic_connection_error(), errors.LLMNetworkError),
+    ],
+)
+async def test_traduce_errores_del_sdk(sdk_error, expected):
+    client, _ = make_client(sdk_error, attempts=1)
+
+    with pytest.raises(expected) as info:
+        await client.generate(MESSAGES)
+
+    assert info.value.provider == "anthropic"
+    assert info.value.original is sdk_error
+    assert info.value.__cause__ is sdk_error
+
+
+async def test_rate_limit_se_reintenta_y_luego_responde():
+    client, endpoint = make_client(
+        anthropic_status_error(anthropic.RateLimitError, 429), anthropic_response("ok")
+    )
+    assert (await client.generate(MESSAGES)).content == "ok"
+    assert len(endpoint.calls) == 2
+
+
+async def test_auth_error_no_se_reintenta():
+    client, endpoint = make_client(
+        anthropic_status_error(anthropic.AuthenticationError, 401), anthropic_response("ok")
+    )
+    with pytest.raises(errors.LLMAuthError):
+        await client.generate(MESSAGES)
+    assert len(endpoint.calls) == 1
+
+
+# --- Construcción del SDK real (sin red) ----------------------------------------
+
+
+def test_construye_el_sdk_sin_reintentos_propios():
+    client = AnthropicClient(api_key="falsa")
+    assert client.model == AnthropicClient.DEFAULT_MODEL
+    assert client._client.max_retries == 0
+
+
+async def test_los_parametros_enviados_existen_en_el_sdk_real():
+    """Ata los kwargs que mandamos a la firma real de `messages.create`.
+
+    Si el SDK deja de aceptar alguno (como pasó con `temperature`, ver Finding 1
+    de la revisión), `bind` lanza TypeError y este test lo detecta sin red.
+    """
+    stream = FakeStream([anthropic_text_event("ok")])
+    client, endpoint = make_client(anthropic_response("ok"), stream)
+    config = ModelConfig(temperature=0.5, system_prompt="Sos un físico.", max_tokens=50)
+
+    await client.generate(MESSAGES, config)
+    async for _ in client.stream(MESSAGES, config):
+        pass
+
+    real_create = anthropic.AsyncAnthropic(api_key="falsa").messages.create
+    for call in endpoint.calls:
+        inspect.signature(real_create).bind(**call)

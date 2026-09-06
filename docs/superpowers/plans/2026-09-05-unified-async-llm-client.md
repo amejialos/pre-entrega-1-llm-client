@@ -103,7 +103,7 @@ OPENAI_MODEL=gpt-4o-mini
 # Para probar el camino de OpenAI gratis con una key de Gemini (Google AI Studio):
 #   OPENAI_API_KEY=<tu key de Gemini, empieza con AIza>
 #   OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
-#   OPENAI_MODEL=gemini-2.5-flash
+#   OPENAI_MODEL=gemini-3.6-flash
 # OPENAI_BASE_URL=
 
 # --- Anthropic ---
@@ -699,12 +699,14 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `tests/fakes.py`
+- Modify: `llm_client/errors.py` (agregar `translate_sdk_error`)
 - Create: `llm_client/openai_client.py`
 - Test: `tests/test_openai_client.py`
 
 **Interfaces:**
 - Consumes: `BaseLLMClient`; `LLMAuthError`, `LLMError`, `LLMNetworkError`, `LLMProviderError`, `LLMRateLimitError`, `LLMServerError`; `with_retry`; `ChatMessage`, `ModelConfig`, `ModelResponse`, `Provider`.
 - Produces:
+  - `translate_sdk_error(error: Exception, *, provider: str, sdk: ModuleType) -> LLMError` en `errors.py`: la misma tabla de traducción sirve para `openai` y `anthropic` porque ambos SDKs exponen excepciones con los mismos nombres.
   - `OpenAIClient(api_key: str, model: str = "gpt-4o-mini", base_url: str | None = None, client: AsyncOpenAI | None = None, attempts: int = 3, base_delay: float = 1.0)` con atributos públicos `model`, `base_url` y clase-atributo `DEFAULT_MODEL`.
   - Fakes reutilizables en `tests/fakes.py`: `FakeStream`, `FakeEndpoint`, `fake_openai_sdk`, `fake_anthropic_sdk`, `openai_response`, `openai_chunk`, `openai_empty_chunk`, `openai_status_error`, `openai_connection_error`, `anthropic_response`, `anthropic_text_event`, `anthropic_json_delta_event`, `anthropic_event`, `anthropic_status_error`, `anthropic_connection_error`.
 
@@ -1080,7 +1082,37 @@ def test_construye_el_sdk_sin_reintentos_propios_y_con_base_url():
 Run: `uv run pytest tests/test_openai_client.py -v`
 Expected: FAIL con `ModuleNotFoundError: No module named 'llm_client.openai_client'`.
 
-- [ ] **Step 4: Implementar `openai_client.py`**
+- [ ] **Step 4: Agregar `translate_sdk_error` a `errors.py`**
+
+Agregar al final de `llm_client/errors.py` (y `from types import ModuleType` arriba, junto a los imports):
+```python
+# --- Traducción desde los SDKs -------------------------------------------------
+
+
+def translate_sdk_error(error: Exception, *, provider: str, sdk: ModuleType) -> LLMError:
+    """Convierte una excepción de un SDK (openai o anthropic) en la LLMError equivalente.
+
+    Ambos SDKs exponen la misma jerarquía de excepciones con los mismos nombres
+    (AuthenticationError, RateLimitError, APIStatusError, APIConnectionError...),
+    así que una sola tabla sirve para los dos: se pasa el módulo del SDK.
+    Se evalúa de la excepción más específica a la más general.
+    """
+    message = getattr(error, "message", None) or str(error)
+    details = {"provider": provider, "original": error}
+    if isinstance(error, (sdk.AuthenticationError, sdk.PermissionDeniedError)):
+        return LLMAuthError(message, **details)
+    if isinstance(error, sdk.RateLimitError):
+        return LLMRateLimitError(message, **details)
+    if isinstance(error, sdk.APIStatusError):
+        status = error.status_code
+        error_cls = LLMServerError if status >= 500 else LLMProviderError  # 529 "overloaded" es >= 500
+        return error_cls(f"{message} (HTTP {status})", **details)
+    if isinstance(error, sdk.APIConnectionError):
+        return LLMNetworkError(message, **details)
+    return LLMProviderError(message, **details)
+```
+
+- [ ] **Step 5: Implementar `openai_client.py`**
 
 `llm_client/openai_client.py`:
 ```python
@@ -1093,14 +1125,7 @@ import openai
 from openai import AsyncOpenAI
 
 from .base import BaseLLMClient
-from .errors import (
-    LLMAuthError,
-    LLMError,
-    LLMNetworkError,
-    LLMProviderError,
-    LLMRateLimitError,
-    LLMServerError,
-)
+from .errors import LLMError, translate_sdk_error
 from .retry import with_retry
 from .schemas import ChatMessage, ModelConfig, ModelResponse, Provider
 
@@ -1209,33 +1234,20 @@ class OpenAIClient(BaseLLMClient):
             raise self._translate(error) from error
 
     def _translate(self, error: openai.APIError) -> LLMError:
-        """Convierte una excepción del SDK en la LLMError correspondiente."""
-        message = error.message
-        details = {"provider": self.provider, "original": error}
-        if isinstance(error, (openai.AuthenticationError, openai.PermissionDeniedError)):
-            return LLMAuthError(message, **details)
-        if isinstance(error, openai.RateLimitError):
-            return LLMRateLimitError(message, **details)
-        if isinstance(error, openai.APIStatusError):
-            if error.status_code >= 500:
-                return LLMServerError(f"{message} (HTTP {error.status_code})", **details)
-            return LLMProviderError(f"{message} (HTTP {error.status_code})", **details)
-        if isinstance(error, openai.APIConnectionError):
-            return LLMNetworkError(message, **details)
-        return LLMProviderError(message, **details)
+        return translate_sdk_error(error, provider=self.provider, sdk=openai)
 ```
 
-- [ ] **Step 5: Correr los tests y verificar que pasan**
+- [ ] **Step 6: Correr los tests y verificar que pasan**
 
 Run: `uv run pytest tests/test_openai_client.py -v`
 Expected: 19 PASSED.
 
 Si `test_construye_el_sdk_sin_reintentos_propios_y_con_base_url` falla porque el SDK expone `max_retries` con otro nombre, revisar `uv run python -c "import openai; c = openai.AsyncOpenAI(api_key='x', max_retries=0); print(c.max_retries, c.base_url)"` y ajustar el test, no la implementación.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add tests/fakes.py llm_client/openai_client.py tests/test_openai_client.py
+git add tests/fakes.py llm_client/errors.py llm_client/openai_client.py tests/test_openai_client.py
 git commit -m "Agregar OpenAIClient con streaming, traducción de errores y reintentos
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
@@ -1250,7 +1262,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Test: `tests/test_anthropic_client.py`
 
 **Interfaces:**
-- Consumes: lo mismo que Task 5, más los fakes `fake_anthropic_sdk`, `anthropic_response`, `anthropic_text_event`, `anthropic_json_delta_event`, `anthropic_event`, `anthropic_status_error`, `anthropic_connection_error`.
+- Consumes: `BaseLLMClient`; `LLMError` y `translate_sdk_error` de `errors.py`; `with_retry`; schemas; y los fakes `FakeStream`, `fake_anthropic_sdk`, `anthropic_response`, `anthropic_text_event`, `anthropic_json_delta_event`, `anthropic_event`, `anthropic_status_error`, `anthropic_connection_error` de `tests/fakes.py`.
 - Produces: `AnthropicClient(api_key: str, model: str = "claude-haiku-4-5", client: AsyncAnthropic | None = None, attempts: int = 3, base_delay: float = 1.0)` con atributo público `model`, clase-atributos `DEFAULT_MODEL` y `MAX_TEMPERATURE = 1.0`.
 
 - [ ] **Step 1: Escribir los tests que fallan**
@@ -1472,14 +1484,7 @@ import anthropic
 from anthropic import AsyncAnthropic
 
 from .base import BaseLLMClient
-from .errors import (
-    LLMAuthError,
-    LLMError,
-    LLMNetworkError,
-    LLMProviderError,
-    LLMRateLimitError,
-    LLMServerError,
-)
+from .errors import LLMError, translate_sdk_error
 from .retry import with_retry
 from .schemas import ChatMessage, ModelConfig, ModelResponse, Provider
 
@@ -1587,20 +1592,7 @@ class AnthropicClient(BaseLLMClient):
             raise self._translate(error) from error
 
     def _translate(self, error: anthropic.APIError) -> LLMError:
-        """Convierte una excepción del SDK en la LLMError correspondiente."""
-        message = error.message
-        details = {"provider": self.provider, "original": error}
-        if isinstance(error, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
-            return LLMAuthError(message, **details)
-        if isinstance(error, anthropic.RateLimitError):
-            return LLMRateLimitError(message, **details)
-        if isinstance(error, anthropic.APIStatusError):
-            if error.status_code >= 500:  # incluye 529 "overloaded"
-                return LLMServerError(f"{message} (HTTP {error.status_code})", **details)
-            return LLMProviderError(f"{message} (HTTP {error.status_code})", **details)
-        if isinstance(error, anthropic.APIConnectionError):
-            return LLMNetworkError(message, **details)
-        return LLMProviderError(message, **details)
+        return translate_sdk_error(error, provider=self.provider, sdk=anthropic)
 ```
 
 - [ ] **Step 4: Correr los tests y verificar que pasan**
@@ -1714,12 +1706,12 @@ def test_el_nombre_del_proveedor_se_normaliza(monkeypatch):
 
 def test_modelo_y_base_url_desde_el_entorno(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "falsa")
-    monkeypatch.setenv("OPENAI_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("OPENAI_MODEL", "gemini-3.6-flash")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
 
     manager = AsyncLLMManager(provider="openai")
 
-    assert manager.client.model == "gemini-2.5-flash"
+    assert manager.client.model == "gemini-3.6-flash"
     assert manager.client.base_url == "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 
@@ -2020,7 +2012,7 @@ Expected (todavía no hay `.env`): dos bloques con `error controlado: [openai] F
 - [ ] **Step 3: Crear el `.env` local**
 
 Run: `cp .env.example .env`
-Después, el usuario edita `.env` en el editor y pega su key de Gemini en la sección de OpenAI (las tres líneas: `OPENAI_API_KEY`, `OPENAI_BASE_URL` descomentada, `OPENAI_MODEL=gemini-2.5-flash`). La key no se pega en el chat.
+Después, el usuario edita `.env` en el editor y pega su key de Gemini en la sección de OpenAI (las tres líneas: `OPENAI_API_KEY`, `OPENAI_BASE_URL` descomentada, `OPENAI_MODEL=gemini-3.6-flash`). La key no se pega en el chat.
 
 Run: `git status --short`
 Expected: `.env` NO aparece (está en `.gitignore`).
@@ -2127,7 +2119,7 @@ habla con Gemini sin cambiar código:
 ```
 OPENAI_API_KEY=<tu key de Gemini>
 OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
-OPENAI_MODEL=gemini-2.5-flash
+OPENAI_MODEL=gemini-3.6-flash
 ```
 
 ## Correr el script de validación
@@ -2253,3 +2245,44 @@ Expected: `gh` crea el repo en la cuenta autenticada, configura `origin` y sube 
 
 Run: `gh repo view --web`
 Expected: se abre el repo en el navegador con el README renderizado y sin `.env`.
+
+---
+
+## Cambios decididos durante la ejecución
+
+Las revisiones por tarea encontraron defectos en el plan (no en la implementación) y se
+resolvieron con estas decisiones. El código final del repo es la referencia; acá queda el
+porqué de cada desvío respecto de los bloques de código de arriba.
+
+- **Task 5, `errors.py`:** `translate_sdk_error` también importa `httpx2` (con fallback a
+  `httpx`) y mapea `httpx.HTTPError` / `httpx.StreamError` a `LLMNetworkError` antes del
+  fallback final. Motivo: durante la iteración de un stream los SDKs no envuelven los
+  errores de transporte. `httpx2` pasa a ser dependencia directa (`uv add httpx2`).
+- **Task 5 y 6, `stream()`:** el `except` que envuelve el `async for` atrapa `Exception`
+  (no solo `APIError`) y traduce. Los `except` de `_generate_once` y `_open_stream`
+  siguen atrapando solo `APIError`.
+- **Task 5, `_generate_once`:** guarda `if not response.choices: raise LLMProviderError(...)`
+  antes de leer `choices[0]`; y el parseo completo (hasta el `return ModelResponse`) va en
+  un `try/except Exception` que lanza `LLMProviderError("Respuesta inesperada del
+  proveedor: ...")` con la excepción original encadenada. Lo mismo en Task 6.
+- **Task 6, temperatura:** anthropic 1.4.0 no acepta `temperature` en `messages.create()`
+  (es un `TypeError`). Se envía `extra_body={"temperature": min(valor, 1.0)}`, que es lo
+  que documenta la guía de migración del SDK para modelos que aún lo aceptan (Haiku 4.5).
+  Los tests de temperatura verifican `request["extra_body"]` y que no haya `temperature`
+  a nivel superior.
+- **Task 5 y 6, tests:** `tests/fakes.py` usa el fallback `httpx2`/`httpx` también para
+  OpenAI (openai 3.8.0 usa `httpx2`; `httpx` no está instalado) y agrega
+  `transport_error()`. Cada cliente suma: un test de error de transporte a mitad de stream
+  (`LLMNetworkError`), uno de `RuntimeError` a mitad de stream (`LLMProviderError`), uno de
+  respuesta con forma inesperada (`LLMProviderError`), y
+  `test_los_parametros_enviados_existen_en_el_sdk_real`, que valida los kwargs capturados
+  por el fake contra la firma real del SDK con `inspect.signature(...).bind(...)`. OpenAI
+  suma además el test de `choices` vacío.
+- **Task 8, `main.py`:** `run_normal` y `run_stream` agregan un `except Exception` final
+  que imprime `error inesperado: ...`, porque una excepción no atrapada dentro de
+  `asyncio.gather` cancela el script entero y deja al otro proveedor sin terminar.
+- **Task 9, README:** la nota sobre temperatura menciona el envío por `extra_body`.
+- **Task 8, `main.py` (tras la prueba real con Gemini):** `max_tokens` pasa de 200 a 4096 y se
+  agrega `system_prompt`, porque Gemini 3.6 Flash razona antes de responder y con 200 tokens la
+  respuesta llegaba cortada (`finish_reason="length"`); la salida muestra `finish_reason`. El
+  modelo gratuito de ejemplo pasa a `gemini-3.6-flash` (Google retiró 2.5 para cuentas nuevas).
