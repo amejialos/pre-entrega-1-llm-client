@@ -184,3 +184,9 @@ def anthropic_connection_error():
     return anthropic.APIConnectionError(
         request=anthropic_httpx.Request("POST", "https://example.test/v1")
     )
+
+
+def transport_error():
+    """Corte de conexión a mitad de stream: no es un error propio del SDK (openai/anthropic
+    APIError), sino una excepción de httpx que la iteración del SDK no envuelve."""
+    return anthropic_httpx.ReadError("conexión cortada")

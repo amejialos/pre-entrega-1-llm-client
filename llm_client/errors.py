@@ -7,6 +7,11 @@ los SDKs. El atributo `retryable` le dice a `with_retry` si vale la pena insisti
 
 from types import ModuleType
 
+try:  # los SDKs 1.x/3.x están construidos sobre httpx2; versiones anteriores usan httpx
+    import httpx2 as httpx
+except ImportError:  # pragma: no cover
+    import httpx
+
 
 class LLMError(Exception):
     """Base de todos los errores del cliente."""
@@ -81,5 +86,7 @@ def translate_sdk_error(error: Exception, *, provider: str, sdk: ModuleType) -> 
         error_cls = LLMServerError if status >= 500 else LLMProviderError  # 529 "overloaded" es >= 500
         return error_cls(f"{message} (HTTP {status})", **details)
     if isinstance(error, sdk.APIConnectionError):
+        return LLMNetworkError(message, **details)
+    if isinstance(error, (httpx.HTTPError, httpx.StreamError)):  # corte de red a mitad de stream
         return LLMNetworkError(message, **details)
     return LLMProviderError(message, **details)

@@ -7,7 +7,7 @@ import openai
 from openai import AsyncOpenAI
 
 from .base import BaseLLMClient
-from .errors import LLMError, translate_sdk_error
+from .errors import LLMError, LLMProviderError, translate_sdk_error
 from .retry import with_retry
 from .schemas import ChatMessage, ModelConfig, ModelResponse, Provider
 
@@ -67,7 +67,10 @@ class OpenAIClient(BaseLLMClient):
                 text = chunk.choices[0].delta.content
                 if text:
                     yield text
-        except openai.APIError as error:
+        except Exception as error:
+            # El SDK no envuelve los errores de transporte durante la iteración: un
+            # corte de conexión a mitad de stream llega como excepción de httpx, no
+            # como openai.APIError. Se traduce igual para no filtrar excepciones crudas.
             raise self._translate(error) from error
         finally:
             await stream.close()
@@ -95,6 +98,11 @@ class OpenAIClient(BaseLLMClient):
             )
         except openai.APIError as error:
             raise self._translate(error) from error
+
+        if not response.choices:
+            raise LLMProviderError(
+                "La API no devolvió ninguna respuesta (choices vacío)", provider=self.provider
+            )
 
         choice = response.choices[0]
         usage = response.usage

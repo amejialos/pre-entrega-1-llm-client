@@ -1,5 +1,6 @@
 """Tests de AnthropicClient con un SDK falso. No tocan la red ni necesitan keys."""
 
+import inspect
 from types import SimpleNamespace
 
 import anthropic
@@ -17,6 +18,7 @@ from tests.fakes import (
     anthropic_status_error,
     anthropic_text_event,
     fake_anthropic_sdk,
+    transport_error,
 )
 
 MESSAGES = [ChatMessage(role="user", content="¿Qué es la entropía?")]
@@ -56,6 +58,7 @@ async def test_generate_envia_modelo_mensajes_y_max_tokens():
     assert request["messages"] == [{"role": "user", "content": "¿Qué es la entropía?"}]
     assert request["max_tokens"] == 50
     assert "temperature" not in request
+    assert "extra_body" not in request
     assert "system" not in request
     assert "stream" not in request
 
@@ -77,13 +80,15 @@ async def test_mensajes_system_y_system_prompt_van_en_el_parametro_system():
 async def test_temperature_se_recorta_a_uno():
     client, endpoint = make_client(anthropic_response("ok"))
     await client.generate(MESSAGES, ModelConfig(temperature=1.5))
-    assert endpoint.calls[0]["temperature"] == 1.0
+    request = endpoint.calls[0]
+    assert request["extra_body"] == {"temperature": 1.0}
+    assert "temperature" not in request
 
 
 async def test_temperature_dentro_del_rango_no_cambia():
     client, endpoint = make_client(anthropic_response("ok"))
     await client.generate(MESSAGES, ModelConfig(temperature=0.3))
-    assert endpoint.calls[0]["temperature"] == 0.3
+    assert endpoint.calls[0]["extra_body"] == {"temperature": 0.3}
 
 
 async def test_generate_concatena_solo_bloques_de_texto():
@@ -143,6 +148,35 @@ async def test_error_a_mitad_de_stream_se_traduce_sin_reintentar():
     assert stream.closed
 
 
+async def test_error_de_transporte_a_mitad_de_stream_se_traduce_sin_reintentar():
+    """El SDK no envuelve los cortes de conexión durante la iteración: llegan como
+    excepción de httpx, no como anthropic.APIError. También se deben traducir."""
+    stream = FakeStream([anthropic_text_event("La ")], fail_after=transport_error())
+    client, endpoint = make_client(stream)
+    received = []
+
+    with pytest.raises(errors.LLMNetworkError):
+        async for chunk in client.stream(MESSAGES):
+            received.append(chunk)
+
+    assert received == ["La "]
+    assert len(endpoint.calls) == 1
+    assert stream.closed
+
+
+async def test_error_inesperado_a_mitad_de_stream_se_traduce_como_provider_error():
+    """Cualquier otra excepción no prevista tampoco debe escapar cruda."""
+    error = RuntimeError("inesperado")
+    stream = FakeStream([anthropic_text_event("La ")], fail_after=error)
+    client, _ = make_client(stream)
+
+    with pytest.raises(errors.LLMProviderError) as info:
+        async for _chunk in client.stream(MESSAGES):
+            pass
+
+    assert info.value.original is error
+
+
 # --- Traducción de errores y reintentos ---------------------------------------
 
 
@@ -193,3 +227,22 @@ def test_construye_el_sdk_sin_reintentos_propios():
     client = AnthropicClient(api_key="falsa")
     assert client.model == AnthropicClient.DEFAULT_MODEL
     assert client._client.max_retries == 0
+
+
+async def test_los_parametros_enviados_existen_en_el_sdk_real():
+    """Ata los kwargs que mandamos a la firma real de `messages.create`.
+
+    Si el SDK deja de aceptar alguno (como pasó con `temperature`, ver Finding 1
+    de la revisión), `bind` lanza TypeError y este test lo detecta sin red.
+    """
+    stream = FakeStream([anthropic_text_event("ok")])
+    client, endpoint = make_client(anthropic_response("ok"), stream)
+    config = ModelConfig(temperature=0.5, system_prompt="Sos un físico.", max_tokens=50)
+
+    await client.generate(MESSAGES, config)
+    async for _ in client.stream(MESSAGES, config):
+        pass
+
+    real_create = anthropic.AsyncAnthropic(api_key="falsa").messages.create
+    for call in endpoint.calls:
+        inspect.signature(real_create).bind(**call)

@@ -1,5 +1,7 @@
 """Tests de OpenAIClient con un SDK falso. No tocan la red ni necesitan keys."""
 
+import inspect
+
 import openai
 import pytest
 
@@ -14,6 +16,7 @@ from tests.fakes import (
     openai_empty_chunk,
     openai_response,
     openai_status_error,
+    transport_error,
 )
 
 MESSAGES = [ChatMessage(role="user", content="¿Qué es la entropía?")]
@@ -84,6 +87,17 @@ async def test_contenido_none_se_convierte_en_cadena_vacia():
     assert response.content == ""
 
 
+async def test_choices_vacio_se_traduce_a_provider_error():
+    """Endpoints compatibles (Gemini, filtros de contenido de Azure) pueden devolver
+    choices: [] en vez de un error HTTP. No debe escapar como IndexError crudo."""
+    response = openai_response("x")
+    response.choices = []
+    client, _ = make_client(response, attempts=1)
+
+    with pytest.raises(errors.LLMProviderError):
+        await client.generate(MESSAGES)
+
+
 # --- Streaming ------------------------------------------------------------------
 
 
@@ -122,6 +136,35 @@ async def test_error_a_mitad_de_stream_se_traduce_sin_reintentar():
     assert received == ["La "]
     assert len(endpoint.calls) == 1
     assert stream.closed
+
+
+async def test_error_de_transporte_a_mitad_de_stream_se_traduce_sin_reintentar():
+    """El SDK no envuelve los cortes de conexión durante la iteración: llegan como
+    excepción de httpx, no como openai.APIError. También se deben traducir."""
+    stream = FakeStream([openai_chunk("La ")], fail_after=transport_error())
+    client, endpoint = make_client(stream)
+    received = []
+
+    with pytest.raises(errors.LLMNetworkError):
+        async for chunk in client.stream(MESSAGES):
+            received.append(chunk)
+
+    assert received == ["La "]
+    assert len(endpoint.calls) == 1
+    assert stream.closed
+
+
+async def test_error_inesperado_a_mitad_de_stream_se_traduce_como_provider_error():
+    """Cualquier otra excepción no prevista tampoco debe escapar cruda."""
+    error = RuntimeError("inesperado")
+    stream = FakeStream([openai_chunk("La ")], fail_after=error)
+    client, _ = make_client(stream)
+
+    with pytest.raises(errors.LLMProviderError) as info:
+        async for _chunk in client.stream(MESSAGES):
+            pass
+
+    assert info.value.original is error
 
 
 # --- Traducción de errores y reintentos ---------------------------------------
@@ -176,3 +219,22 @@ def test_construye_el_sdk_sin_reintentos_propios_y_con_base_url():
     assert client.model == OpenAIClient.DEFAULT_MODEL
     assert client._client.max_retries == 0
     assert str(client._client.base_url) == "https://example.test/v1/"
+
+
+async def test_los_parametros_enviados_existen_en_el_sdk_real():
+    """Ata los kwargs que mandamos a la firma real de `chat.completions.create`.
+
+    Si el SDK deja de aceptar alguno, `bind` lanza TypeError y este test lo detecta
+    sin red (ver el equivalente en tests/test_anthropic_client.py, que sí lo detectó).
+    """
+    stream = FakeStream([openai_chunk("ok")])
+    client, endpoint = make_client(openai_response("ok"), stream)
+    config = ModelConfig(temperature=0.5, system_prompt="Sos un físico.", max_tokens=50)
+
+    await client.generate(MESSAGES, config)
+    async for _chunk in client.stream(MESSAGES, config):
+        pass
+
+    real_create = openai.AsyncOpenAI(api_key="falsa").chat.completions.create
+    for call in endpoint.calls:
+        inspect.signature(real_create).bind(**call)

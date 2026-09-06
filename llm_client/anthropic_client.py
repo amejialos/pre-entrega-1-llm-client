@@ -64,7 +64,10 @@ class AnthropicClient(BaseLLMClient):
                 # content_block_delta cuyo delta es text_delta.
                 if event.type == "content_block_delta" and event.delta.type == "text_delta":
                     yield event.delta.text
-        except anthropic.APIError as error:
+        except Exception as error:
+            # El SDK no envuelve los errores de transporte durante la iteración: un
+            # corte de conexión a mitad de stream llega como excepción de httpx, no
+            # como anthropic.APIError. Se traduce igual para no filtrar excepciones crudas.
             raise self._translate(error) from error
         finally:
             await stream.close()
@@ -86,7 +89,10 @@ class AnthropicClient(BaseLLMClient):
         if system_parts:
             request["system"] = "\n\n".join(system_parts)
         if config.temperature is not None:
-            request["temperature"] = min(config.temperature, self.MAX_TEMPERATURE)
+            # El SDK 1.x quitó temperature de la firma de messages.create(), pero la API
+            # sigue aceptándolo en Haiku 4.5 y modelos anteriores: se envía por extra_body.
+            # Los modelos más nuevos lo rechazan con 400 (LLMProviderError).
+            request["extra_body"] = {"temperature": min(config.temperature, self.MAX_TEMPERATURE)}
         return request
 
     async def _generate_once(self, messages: list[ChatMessage], config: ModelConfig) -> ModelResponse:
