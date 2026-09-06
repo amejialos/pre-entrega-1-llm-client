@@ -35,9 +35,12 @@ llm_client/
     anthropic_client.py  # AnthropicClient
     manager.py           # AsyncLLMManager
 tests/
-    conftest.py          # fakes compartidos de los SDKs
+    __init__.py
+    fakes.py             # dobles de prueba que imitan la forma mínima de los SDKs
     test_schemas.py
+    test_errors.py
     test_retry.py
+    test_base.py
     test_openai_client.py
     test_anthropic_client.py
     test_manager.py
@@ -116,6 +119,7 @@ async def with_retry(
     *,
     attempts: int = 3,
     base_delay: float = 1.0,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> T
 ```
 
@@ -123,6 +127,10 @@ Ejecuta `operation()`. Si lanza un `LLMError` con `retryable = True` y quedan in
 espera `base_delay * 2 ** (n - 1)` segundos (1 s, 2 s) y reintenta. Si el error no es
 reintentable, o se agotaron los intentos, relanza el mismo error. Registra cada reintento
 con `logging` a nivel `WARNING`. No conoce ningún SDK: solo entiende `LLMError`.
+
+`sleep` es inyectable para que los tests registren las esperas sin dormir de verdad.
+Los clientes exponen `attempts` y `base_delay` en su constructor y los pasan a
+`with_retry`; los tests usan `attempts=1` o `base_delay=0` según el caso.
 
 ### 3.4 `base.py`
 
@@ -147,7 +155,8 @@ función sea las dos cosas. Si `config` es `None`, el cliente usa `ModelConfig()
 class OpenAIClient(BaseLLMClient):
     provider = "openai"
     def __init__(self, api_key: str, model: str = "gpt-4o-mini",
-                 base_url: str | None = None, client: AsyncOpenAI | None = None)
+                 base_url: str | None = None, client: AsyncOpenAI | None = None,
+                 attempts: int = 3, base_delay: float = 1.0)
 ```
 
 - Construye `AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=0)` salvo que se
@@ -185,7 +194,8 @@ reintentan, porque ya se entregó texto al consumidor.
 class AnthropicClient(BaseLLMClient):
     provider = "anthropic"
     def __init__(self, api_key: str, model: str = "claude-haiku-4-5",
-                 client: AsyncAnthropic | None = None)
+                 client: AsyncAnthropic | None = None,
+                 attempts: int = 3, base_delay: float = 1.0)
 ```
 
 - Construye `AsyncAnthropic(api_key=api_key, max_retries=0)` salvo inyección.
@@ -306,7 +316,7 @@ respuestas reales.
 Sin red, sin keys. Herramientas: `pytest`, `pytest-asyncio` en modo `auto` (no hace
 falta decorar cada test).
 
-Estrategia: inyección de dependencias. Los fakes de `tests/conftest.py` imitan la forma
+Estrategia: inyección de dependencias. Los fakes de `tests/fakes.py` imitan la forma
 mínima de cada SDK (`chat.completions.create` / `messages.create`) y se configuran para
 devolver una respuesta, devolver un stream de fragmentos, o lanzar una secuencia de
 excepciones reales del SDK (por ejemplo `openai.RateLimitError`) construidas con
@@ -324,8 +334,8 @@ argumentos.
 ## 8. README
 
 Secciones: qué es el proyecto; estructura con una línea por archivo; instalación con
-`uv` (`uv sync`) y con `venv` clásico (`python3.12 -m venv .venv`, `pip install -e
-".[dev]"`); variables de entorno y dónde conseguir cada key (incluido el uso gratuito
+`uv` (`uv sync`) y con `venv` clásico (`python3.12 -m venv .venv`, `pip install -e .`,
+`pip install pytest pytest-asyncio`); variables de entorno y dónde conseguir cada key (incluido el uso gratuito
 con Gemini); cómo correr `main.py` y qué salida esperar con y sin keys; cómo correr los
 tests; cómo funciona el manejo de errores y reintentos; limitaciones conocidas.
 
