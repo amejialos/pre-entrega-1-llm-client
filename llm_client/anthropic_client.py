@@ -4,7 +4,8 @@ from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
 import anthropic
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, AsyncStream
+from anthropic.types import RawMessageStreamEvent
 
 from .base import BaseLLMClient
 from .errors import LLMError, LLMProviderError, translate_sdk_error
@@ -51,6 +52,11 @@ class AnthropicClient(BaseLLMClient):
         messages: list[ChatMessage],
         config: ModelConfig | None = None,
     ) -> AsyncIterator[str]:
+        """Entrega la respuesta en fragmentos de texto a medida que llegan.
+
+        Si abandonás el bucle antes de terminar (break), envolvé el generador en
+        `contextlib.aclosing()` para cerrar la conexión de inmediato.
+        """
         config = config or ModelConfig()
         # Solo la apertura se reintenta (ver OpenAIClient.stream).
         stream = await with_retry(
@@ -98,7 +104,8 @@ class AnthropicClient(BaseLLMClient):
     async def _generate_once(self, messages: list[ChatMessage], config: ModelConfig) -> ModelResponse:
         try:
             response = await self._client.messages.create(**self._build_request(messages, config))
-        except anthropic.APIError as error:
+        except Exception as error:
+            # Exception y no solo APIError: un cambio de firma del SDK (TypeError) también debe salir como LLMError
             raise self._translate(error) from error
 
         try:
@@ -117,13 +124,16 @@ class AnthropicClient(BaseLLMClient):
                 f"Respuesta inesperada del proveedor: {error}", provider=self.provider, original=error
             ) from error
 
-    async def _open_stream(self, messages: list[ChatMessage], config: ModelConfig):
+    async def _open_stream(
+        self, messages: list[ChatMessage], config: ModelConfig
+    ) -> AsyncStream[RawMessageStreamEvent]:
         try:
             return await self._client.messages.create(
                 **self._build_request(messages, config), stream=True
             )
-        except anthropic.APIError as error:
+        except Exception as error:
+            # Exception y no solo APIError: un cambio de firma del SDK (TypeError) también debe salir como LLMError
             raise self._translate(error) from error
 
-    def _translate(self, error: anthropic.APIError) -> LLMError:
+    def _translate(self, error: Exception) -> LLMError:
         return translate_sdk_error(error, provider=self.provider, sdk=anthropic)

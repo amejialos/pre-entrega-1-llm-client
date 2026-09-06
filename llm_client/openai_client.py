@@ -4,7 +4,8 @@ from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
 import openai
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, AsyncStream
+from openai.types.chat import ChatCompletionChunk
 
 from .base import BaseLLMClient
 from .errors import LLMError, LLMProviderError, translate_sdk_error
@@ -52,6 +53,11 @@ class OpenAIClient(BaseLLMClient):
         messages: list[ChatMessage],
         config: ModelConfig | None = None,
     ) -> AsyncIterator[str]:
+        """Entrega la respuesta en fragmentos de texto a medida que llegan.
+
+        Si abandonás el bucle antes de terminar (break), envolvé el generador en
+        `contextlib.aclosing()` para cerrar la conexión de inmediato.
+        """
         config = config or ModelConfig()
         # Solo la apertura se reintenta: ahí aparecen los errores de auth y de cuota.
         # Reintentar a mitad de stream duplicaría texto ya entregado.
@@ -96,7 +102,8 @@ class OpenAIClient(BaseLLMClient):
             response = await self._client.chat.completions.create(
                 **self._build_request(messages, config)
             )
-        except openai.APIError as error:
+        except Exception as error:
+            # Exception y no solo APIError: un cambio de firma del SDK (TypeError) también debe salir como LLMError
             raise self._translate(error) from error
 
         if not response.choices:
@@ -120,13 +127,16 @@ class OpenAIClient(BaseLLMClient):
                 f"Respuesta inesperada del proveedor: {error}", provider=self.provider, original=error
             ) from error
 
-    async def _open_stream(self, messages: list[ChatMessage], config: ModelConfig):
+    async def _open_stream(
+        self, messages: list[ChatMessage], config: ModelConfig
+    ) -> AsyncStream[ChatCompletionChunk]:
         try:
             return await self._client.chat.completions.create(
                 **self._build_request(messages, config), stream=True
             )
-        except openai.APIError as error:
+        except Exception as error:
+            # Exception y no solo APIError: un cambio de firma del SDK (TypeError) también debe salir como LLMError
             raise self._translate(error) from error
 
-    def _translate(self, error: openai.APIError) -> LLMError:
+    def _translate(self, error: Exception) -> LLMError:
         return translate_sdk_error(error, provider=self.provider, sdk=openai)

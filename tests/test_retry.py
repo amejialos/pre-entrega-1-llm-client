@@ -1,5 +1,7 @@
 """Tests de with_retry. `sleep` se inyecta para registrar las esperas sin dormir."""
 
+import logging
+
 import pytest
 
 from llm_client.errors import LLMAuthError, LLMRateLimitError
@@ -84,3 +86,16 @@ async def test_attempts_menor_a_uno_es_error_de_programacion():
     operation, _ = flaky(failures=0)
     with pytest.raises(ValueError):
         await with_retry(operation, attempts=0)
+
+
+async def test_registra_un_warning_por_cada_reintento(caplog):
+    operation, _ = flaky(failures=2)
+    recorder = SleepRecorder()
+
+    with caplog.at_level(logging.WARNING, logger="llm_client.retry"):
+        await with_retry(operation, attempts=3, sleep=recorder.sleep)
+
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_records) == 2
+    for record in warning_records:
+        assert "Reintentando" in record.getMessage()

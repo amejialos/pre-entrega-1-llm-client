@@ -21,11 +21,12 @@ tests/                   # pytest, sin red y sin keys (los SDKs se reemplazan po
 main.py                  # script de validación: modo normal y streaming
 .env.example             # variables de entorno necesarias
 pyproject.toml           # dependencias y configuración
+docs/superpowers/        # especificación de diseño y plan de implementación
 ```
 
 ## Instalación
 
-Requiere Python 3.12.
+Requiere Python 3.12 o superior.
 
 **Con `uv` (recomendado):**
 
@@ -138,7 +139,7 @@ así el código que usa el paquete solo necesita `except LLMError`:
 | Error del proveedor (5xx, sobrecarga 529) | `LLMServerError` | Sí |
 | Otro error HTTP (400, 404...) | `LLMProviderError` | No |
 
-Los errores reintentables se reintentan hasta 3 veces con espera exponencial (1 s, 2 s).
+Los errores reintentables se intentan hasta 3 veces en total (es decir, 2 reintentos) con espera exponencial (1 s, 2 s).
 Los SDKs se construyen con `max_retries=0` para que esta sea la única lógica de reintento.
 En streaming solo se reintenta la apertura: un corte a mitad de stream se reporta como
 error sin reintentar, porque repetir la llamada duplicaría texto ya mostrado.
@@ -155,3 +156,8 @@ error sin reintentar, porque repetir la llamada duplicaría texto ya mostrado.
 - Solo texto: sin imágenes, herramientas ni salida estructurada.
 - Los modelos de razonamiento de OpenAI (serie o, GPT-5) exigen `max_completion_tokens`
   en vez de `max_tokens` y no están soportados como default.
+- Si abandonás un stream a mitad (`break`), envolvé el generador en `contextlib.aclosing()`
+  para cerrar la conexión de inmediato; si no, se cierra recién cuando el generador se
+  recolecta.
+- Los clientes no cierran explícitamente el pool de conexiones del SDK (no hay `aclose()`);
+  para un script corto no importa, en un servicio de larga vida convendría agregarlo.

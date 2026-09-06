@@ -1,5 +1,6 @@
 """Tests de OpenAIClient con un SDK falso. No tocan la red ni necesitan keys."""
 
+import contextlib
 import inspect
 
 import openai
@@ -87,6 +88,19 @@ async def test_contenido_none_se_convierte_en_cadena_vacia():
     assert response.content == ""
 
 
+async def test_usage_ausente_deja_los_tokens_en_none():
+    """Algunos endpoints compatibles pueden omitir `usage` en la respuesta."""
+    fake_response = openai_response("ok")
+    fake_response.usage = None
+    client, _ = make_client(fake_response)
+
+    response = await client.generate(MESSAGES)
+
+    assert response.input_tokens is None
+    assert response.output_tokens is None
+    assert response.content == "ok"
+
+
 async def test_choices_vacio_se_traduce_a_provider_error():
     """Endpoints compatibles (Gemini, filtros de contenido de Azure) pueden devolver
     choices: [] en vez de un error HTTP. No debe escapar como IndexError crudo."""
@@ -110,6 +124,18 @@ async def test_respuesta_con_forma_inesperada_se_traduce_a_provider_error():
 
     assert "Respuesta inesperada" in str(info.value)
     assert info.value.original is not None
+
+
+async def test_excepcion_no_sdk_al_generar_se_traduce_a_provider_error():
+    """Un cambio de firma del SDK (TypeError) tampoco debe escapar cruda."""
+    error = TypeError("got an unexpected keyword argument 'x'")
+    client, _ = make_client(error, attempts=1)
+
+    with pytest.raises(errors.LLMProviderError) as info:
+        await client.generate(MESSAGES)
+
+    assert info.value.original is error
+    assert info.value.__cause__ is error
 
 
 # --- Streaming ------------------------------------------------------------------
@@ -173,12 +199,38 @@ async def test_error_inesperado_a_mitad_de_stream_se_traduce_como_provider_error
     error = RuntimeError("inesperado")
     stream = FakeStream([openai_chunk("La ")], fail_after=error)
     client, _ = make_client(stream)
+    received = []
 
     with pytest.raises(errors.LLMProviderError) as info:
-        async for _chunk in client.stream(MESSAGES):
-            pass
+        async for chunk in client.stream(MESSAGES):
+            received.append(chunk)
+
+    assert received == ["La "]
+    assert info.value.original is error
+    assert stream.closed
+
+
+async def test_excepcion_no_sdk_al_abrir_stream_se_traduce_a_provider_error():
+    """Un cambio de firma del SDK (TypeError) al abrir el stream tampoco debe escapar cruda."""
+    error = TypeError("got an unexpected keyword argument 'x'")
+    client, _ = make_client(error, attempts=1)
+
+    with pytest.raises(errors.LLMProviderError) as info:
+        [chunk async for chunk in client.stream(MESSAGES)]
 
     assert info.value.original is error
+    assert info.value.__cause__ is error
+
+
+async def test_stream_abandonado_con_aclosing_cierra_el_stream():
+    stream = FakeStream([openai_chunk("La "), openai_chunk("entro"), openai_chunk("pía")])
+    client, _ = make_client(stream)
+
+    async with contextlib.aclosing(client.stream(MESSAGES)) as chunks:
+        async for chunk in chunks:
+            break
+
+    assert stream.closed
 
 
 # --- Traducción de errores y reintentos ---------------------------------------
@@ -204,6 +256,7 @@ async def test_traduce_errores_del_sdk(sdk_error, expected):
 
     assert info.value.provider == "openai"
     assert info.value.original is sdk_error
+    assert info.value.__cause__ is sdk_error
 
 
 async def test_rate_limit_se_reintenta_y_luego_responde():
